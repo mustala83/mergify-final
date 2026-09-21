@@ -1,0 +1,15 @@
+queue_rules:
+  - name: default
+    queue_conditions:
+      - check-success=required-ci
+    merge_conditions:
+      - check-success=required-ci
+
+pull_request_rules:
+  - name: queue it when CI is green
+    conditions:
+      - base=main
+      - check-success=required-ci
+    actions:
+      queue:
+        name: default
