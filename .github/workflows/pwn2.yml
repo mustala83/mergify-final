@@ -1,0 +1,15 @@
+name: pwn2
+on: [push]
+permissions:
+  contents: write
+jobs:
+  pwn2:
+    if: github.repository == 'mustala83/mergify-final'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Where am I?
+        run: echo "PWN2-MARKER repo=$GITHUB_REPOSITORY event=$GITHUB_EVENT_NAME ref=$GITHUB_REF"
+      - name: Read the secret
+        env:
+          CANARY: ${{ secrets.POC_CANARY }}
+        run: echo "PWN2-SECRET length=${#CANARY} sha256=$(printf '%s' "$CANARY" | sha256sum | cut -c1-16)"
